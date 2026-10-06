@@ -1,0 +1,1191 @@
+<!doctype html>
+<html lang="es-DO">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#17345c">
+<title>Despacho | Guiliani's Market, panel de la demo</title>
+<link rel="icon" type="image/png" href="assets/despacho-favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ==========================================================================
+   Panel de despacho: demo Guiliani's Market.
+
+   Es la pieza que muestra DONDE interviene la persona: el asistente toma el
+   pedido por libra y calcula un total ESTIMADO; el equipo valida el pago, pesa
+   cada producto y el total final se recalcula con el peso real.
+
+   Lee   GET {webhook}/guilianismarket-demo-despacho   cada 6 s
+         -> { ok:true, pedidos:[{ id, creado, estado:'pending|verified|rejected',
+              cliente, direccion, items, notas, total, pagado_en }] }
+   `items`: "5 lb Filete de salmón..., 2.5 lb Camarón..." (tolera "Nx Nombre").
+   `total` incluye ITBIS. NUNCA se pinta ningun `token`.
+
+   Columnas: "Esperando validación de pago" (NO EMPACAR) y "A pesaje y empaque".
+   El ajuste de peso es una simulación de la demo: no se guarda.
+
+   ?mock=1  -> pedidos de ejemplo del catalogo, sin red (para disenar/probar).
+   Candados de red (incidente del 29-sep: una pestana sondeando un webhook
+   inexistente disparo la alarma de 5xx de la instancia compartida):
+     file://  -> siempre mock, nunca consulta
+     pestana oculta -> no consulta
+     fallos -> backoff exponencial y corte tras 6 seguidos (boton Reintentar)
+   ========================================================================== */
+:root{
+  --navy:#17345c; --navy-deep:#10243f;
+  --paper:#f6f3ec; --paper-2:#fbf9f4;
+  --ink:#1c2430; --muted:#5c6570; --line:#e2dcd2;
+  --green:#1b7a4a; --green-tint:#e4f2ea; --green-ink:#12552f;
+  --amber-ink:#7a4f00; --amber-tint:#fdf0d0; --amber:#c98a12;
+  --red-ink:#8c1f18; --red-tint:#fdecea;
+  --sans:'Source Sans 3','Segoe UI',system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.45;
+  -webkit-font-smoothing:antialiased;min-height:100dvh;display:flex;flex-direction:column;font-variant-numeric:tabular-nums}
+img{max-width:100%;display:block}
+h1,h2,h3,p,ul,dl,dd{margin:0}
+ul{padding:0;list-style:none}
+button,input,select{font-family:inherit;font-size:inherit;color:inherit}
+[hidden]{display:none !important}
+a{color:var(--navy)}
+:focus-visible{outline:3px solid var(--navy);outline-offset:2px;border-radius:6px}
+#print-area{display:none}
+
+/* ---------- barra superior ---------- */
+.bar{background:var(--navy);flex:none;position:relative;z-index:5}
+.bar-in{display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;padding:8px 20px}
+.bar .logo{height:48px;width:auto;flex:none}
+.bar h1{font-weight:800;font-size:1.5rem;letter-spacing:-.01em;line-height:1;color:#fff}
+.bar h1 small{display:block;margin-top:3px;font-size:12px;font-weight:600;letter-spacing:.06em;opacity:.8}
+.stats{display:flex;gap:8px;margin-left:6px}
+.stat{background:rgba(255,255,255,.12);border-radius:10px;padding:5px 14px 4px;text-align:center;min-width:74px;color:#fff}
+.stat b{display:block;font-weight:800;font-size:1.6rem;line-height:1}
+.stat span{display:block;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.85}
+.bar-sp{flex:1}
+.est{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:#fff}
+.est .pt{width:10px;height:10px;border-radius:50%;background:#5fd69b;flex:none}
+.est.off .pt{background:#ff8a80}
+.est.mock .pt{background:#f4c45a}
+.reloj{font-weight:800;font-size:1.4rem;letter-spacing:.02em;line-height:1;color:#fff}
+.btn-mini{min-height:44px;border-radius:10px;border:2px solid rgba(255,255,255,.65);background:transparent;color:#fff;padding:0 14px;font-weight:700;font-size:14px;cursor:pointer}
+.btn-mini:hover{background:#fff;color:var(--navy)}
+.aviso-red{background:var(--red-tint);color:var(--red-ink);font-weight:700;text-align:center;padding:10px 16px;font-size:15px;border-bottom:1px solid #f1c1bc}
+.aviso-red .btn-mini{border-color:var(--red-ink);color:var(--red-ink);margin-left:10px}
+.aviso-red .btn-mini:hover{background:var(--red-ink);color:#fff}
+
+/* ---------- tablero ---------- */
+.board{flex:1;display:grid;grid-template-columns:minmax(0,1fr);gap:20px;padding:20px;align-items:start;min-height:0;width:100%;max-width:1480px;margin:0 auto}
+@media (min-width:1080px){ .board{grid-template-columns:minmax(310px,.62fr) minmax(0,1.55fr)} }
+@media (max-width:1079px){ .col-go{order:-1} }
+.col{min-width:0}
+.col-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.col-h h2{font-weight:800;font-size:1.45rem;letter-spacing:-.01em;line-height:1.15;color:var(--navy)}
+.col-h .n{font-weight:800;font-size:1rem;line-height:1;background:var(--navy);color:#fff;border-radius:999px;min-width:30px;height:30px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center}
+.col-sub{margin:6px 0 14px;font-size:14.5px;color:var(--muted);line-height:1.45;max-width:62ch}
+.col-sub b{color:var(--ink);font-weight:700}
+.lista{display:grid;gap:14px}
+.vacio{border:2px dashed var(--line);border-radius:14px;padding:26px 18px;text-align:center;color:var(--muted);font-weight:600;background:var(--paper-2)}
+.vacio strong{display:block;color:var(--ink);font-size:1.1rem;margin-bottom:4px}
+.vacio.err{border-color:#e7b4ae;color:var(--red-ink);background:var(--red-tint)}
+.otros{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:14px}
+.otros summary{cursor:pointer;padding:12px 16px;font-weight:700;color:var(--muted);font-size:15px;min-height:44px;display:flex;align-items:center}
+.otros .lista{padding:0 12px 12px}
+
+/* ---------- tarjeta: esperando validacion ---------- */
+.ped{background:#fff;border:1px solid var(--line);border-radius:14px;padding:16px 18px;position:relative}
+.ped.wait{border-left:6px solid var(--amber)}
+.ped.rechazado{border-left-color:#d9776f;opacity:.9}
+.ped.rechazado .num{text-decoration:line-through;color:#8c5a56}
+.ped.go{border-left:6px solid var(--green)}
+.ped.nuevo{animation:nuevo 1.1s ease-in-out 5}
+@keyframes nuevo{0%,100%{box-shadow:0 0 0 0 rgba(27,122,74,0)}50%{box-shadow:0 0 0 6px rgba(27,122,74,.28)}}
+.p-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.num{font-weight:800;font-size:1.5rem;letter-spacing:-.01em;line-height:1;color:var(--navy)}
+.p-hora{font-size:14px;font-weight:600;color:var(--muted)}
+.chip{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700;border-radius:999px;padding:5px 12px;line-height:1.1;white-space:nowrap}
+.chip.ok{background:var(--green-tint);color:var(--green-ink)}
+.chip.espera{background:var(--amber-tint);color:var(--amber-ink)}
+.chip.no{background:var(--red-tint);color:var(--red-ink)}
+.p-cli{margin-top:10px}
+.p-cli b{display:block;font-size:1.15rem;font-weight:800;line-height:1.2}
+.p-cli span{display:block;font-size:15px;color:var(--muted);line-height:1.35}
+.p-nota{margin-top:10px;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:15px;line-height:1.4}
+.p-nota small{display:block;font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+.lista-simple{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
+.lista-simple li{display:flex;gap:10px;padding:3px 0;font-size:15.5px;line-height:1.3;font-weight:600}
+.lista-simple .q{flex:none;min-width:5.2ch;color:var(--navy);font-weight:800;text-align:right}
+.p-est{display:flex;justify-content:space-between;align-items:baseline;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+.p-est span{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.p-est b{font-weight:800;font-size:1.35rem}
+.p-msg{margin-top:10px;font-size:14px;font-weight:700;color:var(--amber-ink);background:var(--amber-tint);border-radius:10px;padding:8px 12px}
+.ped.rechazado .p-msg{color:var(--red-ink);background:var(--red-tint)}
+
+/* ---------- tarjeta: a pesaje ---------- */
+.peso-tabla{width:100%;border-collapse:collapse;margin-top:14px}
+.peso-tabla thead th{font-size:12px;font-weight:800;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);text-align:left;padding:0 10px 8px;border-bottom:2px solid var(--line);white-space:nowrap}
+.peso-tabla .r{text-align:right}
+.peso-tabla tbody td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top;font-size:16px}
+.peso-tabla tbody tr:last-child td{border-bottom:0}
+.c-prod{width:38%}
+.nom{font-weight:700;line-height:1.3}
+.itb{display:inline-block;margin-left:8px;vertical-align:1px;font-size:11px;font-weight:800;letter-spacing:.06em;color:var(--navy);border:1.5px solid var(--navy);border-radius:6px;padding:1px 6px 0;line-height:1.5}
+.c-ped b{font-weight:800}
+.c-ped small,.c-pre small{display:block;font-size:12.5px;color:var(--muted);font-weight:600}
+.c-pre .pr{font-weight:700}
+.inp{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.inp input{width:118px;min-height:48px;padding:0 12px;border:2px solid var(--line);border-radius:10px;background:#fff;text-align:right;font-weight:800;font-size:1.2rem;-webkit-appearance:none;appearance:none;font-variant-numeric:tabular-nums}
+.inp input::placeholder{color:#8a929b;font-weight:600}
+.inp input:focus{border-color:var(--navy);outline:0;box-shadow:0 0 0 3px rgba(23,52,92,.18)}
+.inp input.pesado{border-color:var(--green);background:#f3faf6}
+.inp input.mal{border-color:#d9534f;background:var(--red-tint)}
+.inp .u{font-weight:700;color:var(--muted);font-size:15px}
+.inp.precio input{width:116px;font-size:1.05rem}
+.c-sub{text-align:right;font-weight:800;font-size:1.05rem;white-space:nowrap}
+.c-sub.prov{color:var(--muted);font-weight:600}
+.c-sub small{display:block;font-size:12px;font-weight:600;color:var(--muted)}
+.sin-lista{margin-top:6px;font-size:13.5px;font-weight:700;color:var(--amber-ink);background:var(--amber-tint);border-radius:8px;padding:6px 9px;line-height:1.35}
+.manual{margin-top:8px;display:flex;flex-direction:column;gap:7px}
+.manual select{width:100%;min-height:44px;border:2px solid var(--line);border-radius:10px;background:#fff;padding:0 10px;font-size:14.5px}
+.manual label.chk{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;min-height:32px}
+.manual input[type=checkbox]{width:20px;height:20px;accent-color:var(--navy)}
+
+.cierre{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-top:6px;padding-top:14px;border-top:2px solid var(--line)}
+@media (min-width:720px){ .cierre{grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);align-items:start} }
+.prog{font-size:14.5px;color:var(--muted);line-height:1.45}
+.prog b{color:var(--ink)}
+.prog .alerta{margin-top:8px;font-weight:700;color:var(--amber-ink);background:var(--amber-tint);border-radius:10px;padding:8px 12px}
+.prog .nota-sim{margin-top:8px;font-size:13.5px}
+.tot{display:grid;gap:5px}
+.tot div{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:15.5px}
+.tot dt{color:var(--muted);font-weight:600}
+.tot dt small{font-size:12.5px}
+.tot dd{font-weight:700}
+.tot .gran{margin-top:6px;padding-top:8px;border-top:2px solid var(--ink)}
+.tot .gran dt{color:var(--ink);font-weight:800;font-size:15px;letter-spacing:.05em;text-transform:uppercase}
+.tot .gran dd{font-weight:800;font-size:1.9rem;line-height:1;letter-spacing:-.01em}
+.tot .est-l dd{font-weight:700;color:var(--muted)}
+.dif{margin-top:4px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-radius:10px;padding:9px 12px;font-weight:800;font-size:15.5px;line-height:1.25}
+.dif span:last-child{white-space:nowrap}
+.dif.menor{background:var(--green-tint);color:var(--green-ink)}
+.dif.igual{background:var(--green-tint);color:var(--green-ink)}
+.dif.mayor{background:var(--amber-tint);color:var(--amber-ink)}
+.dif.nd{background:var(--paper);color:var(--muted)}
+
+.acc{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.btn{min-height:48px;border-radius:10px;border:2px solid var(--navy);padding:0 18px;font-weight:800;font-size:15.5px;cursor:pointer;line-height:1.1;background:#fff;color:var(--navy)}
+.btn:hover{background:var(--paper)}
+.btn.pri{background:var(--navy);color:#fff}
+.btn.pri:hover{background:var(--navy-deep)}
+.btn.ok{border-color:var(--green);color:var(--green-ink)}
+.btn.ok:hover{background:var(--green-tint)}
+.btn.suave{border-color:var(--line);color:var(--muted)}
+.btn.suave:hover{border-color:var(--navy);color:var(--navy)}
+.btn:active,.btn-mini:active{transform:translateY(1px)}
+
+.pie{padding:6px 20px 20px;font-size:13px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;max-width:1480px;width:100%;margin:0 auto}
+.pie a{font-weight:700;text-decoration:none}
+.pie a:hover{text-decoration:underline}
+.pie .sp{flex:1}
+.pie code{background:#fff;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px}
+
+/* ---------- movil / tablet angosta: cada producto es una tarjeta ---------- */
+@media (max-width:760px){
+  .bar-in{padding:8px 14px;gap:8px 12px}
+  .bar .logo{height:40px}
+  .bar h1{font-size:1.3rem}
+  .bar h1 small{display:none}
+  .stats{margin-left:0}
+  .stat{min-width:64px;padding:4px 10px 3px}
+  .stat b{font-size:1.35rem}
+  .reloj{display:none}
+  .bar-sp{display:none}
+  .est{font-size:12.5px}
+  .board{padding:14px;gap:16px}
+  .ped{padding:14px}
+  .peso-tabla,.peso-tabla tbody,.peso-tabla tr,.peso-tabla td{display:block;width:100%}
+  .peso-tabla thead{position:absolute;left:-9999px}
+  .peso-tabla tbody tr{border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px;background:var(--paper-2);display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 14px}
+  .peso-tabla tbody td{padding:0;border:0}
+  .peso-tabla tbody td::before{content:attr(data-l);display:block;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:3px}
+  .peso-tabla td.c-prod{grid-column:1 / -1;width:100%}
+  .peso-tabla td.c-prod::before{display:none}
+  .peso-tabla td.c-ped,.peso-tabla td.c-pre,.peso-tabla td.c-sub{text-align:left}
+  .c-ped small,.c-pre small{display:none}
+  .peso-tabla td.c-sub{white-space:normal}
+  .inp{justify-content:flex-start}
+  .inp input{width:100%;max-width:150px}
+  .inp.precio input{max-width:150px}
+  .acc .btn{flex:1 1 100%}
+}
+
+/* ---------- impresion: solo la hoja de despacho ---------- */
+@page{ size:letter portrait; margin:14mm }
+@media print{
+  html,body{background:#fff !important;color:#000 !important;min-height:0 !important;display:block !important}
+  body > *:not(#print-area){display:none !important}
+  #print-area{display:block !important}
+}
+.hoja{font-family:var(--sans);color:#000;font-size:12.5pt;line-height:1.35}
+.hoja .h-top{display:flex;align-items:center;gap:14px;border-bottom:3px solid #000;padding-bottom:10px}
+.hoja .h-top img{height:62px;width:auto}
+.hoja .h-top h1{font-size:22pt;font-weight:800;line-height:1}
+.hoja .h-top p{font-size:11pt;margin-top:3px}
+.hoja .h-num{margin-left:auto;text-align:right}
+.hoja .h-num b{display:block;font-size:20pt;font-weight:800;line-height:1}
+.hoja .h-num span{font-size:10.5pt}
+.hoja .h-cli{display:grid;grid-template-columns:1fr 1fr;gap:6px 22px;padding:10px 0;border-bottom:1.5px solid #000}
+.hoja .h-cli div small{display:block;font-size:9pt;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.hoja .h-cli div b{font-size:13pt;font-weight:800}
+.hoja .h-cli .ancho{grid-column:1 / -1}
+.hoja table{width:100%;border-collapse:collapse;margin-top:12px}
+.hoja th{font-size:9pt;font-weight:800;letter-spacing:.06em;text-transform:uppercase;text-align:left;border-bottom:2px solid #000;padding:0 6px 5px}
+.hoja th.r,.hoja td.r{text-align:right}
+.hoja td{padding:9px 6px;border-bottom:1px solid #999;vertical-align:top;font-size:12pt}
+.hoja td .it{font-size:8.5pt;font-weight:800;border:1px solid #000;border-radius:3px;padding:0 3px;margin-left:5px;vertical-align:1px}
+.hoja td .raya{display:inline-block;min-width:22mm;border-bottom:1.5px solid #000;height:1.2em;vertical-align:bottom}
+.hoja .h-tot{margin:12px 0 0 auto;width:92mm}
+.hoja .h-tot div{display:flex;justify-content:space-between;padding:2px 0;font-size:12pt}
+.hoja .h-tot .gran{border-top:2.5px solid #000;margin-top:5px;padding-top:5px;font-size:15pt;font-weight:800}
+.hoja .h-aviso{margin-top:10px;font-size:10.5pt;border:1.5px solid #000;border-radius:4px;padding:6px 9px}
+.hoja .h-firma{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:18px;margin-top:26px}
+.hoja .h-firma div{border-top:1.5px solid #000;padding-top:4px;font-size:9.5pt;font-weight:700}
+.hoja .h-pie{margin-top:16px;font-size:9pt}
+@media (prefers-reduced-motion:reduce){ .ped.nuevo{animation:none} }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-in">
+    <img class="logo" src="assets/despacho-logo-blanco.png" width="194" height="200" alt="Guiliani's Market">
+    <h1>Despacho<small>Panel del equipo</small></h1>
+    <div class="stats" aria-live="polite">
+      <div class="stat"><b id="k-go">0</b><span>A pesaje</span></div>
+      <div class="stat"><b id="k-wait">0</b><span>Sin validar</span></div>
+    </div>
+    <div class="bar-sp"></div>
+    <button class="btn-mini" id="btn-sim" type="button" hidden>+ Simular pedido</button>
+    <div class="est" id="est" role="status"><span class="pt"></span><span id="est-txt">Conectando&hellip;</span></div>
+    <div class="reloj" id="reloj">--:--</div>
+  </div>
+</header>
+<div class="aviso-red" id="aviso-red" role="alert" hidden></div>
+
+<main class="board">
+
+  <section class="col col-wait" aria-labelledby="h-wait">
+    <div class="col-h">
+      <h2 id="h-wait">Esperando validaci&oacute;n de pago</h2>
+      <span class="n" id="n-wait">0</span>
+    </div>
+    <p class="col-sub">Estos pedidos todav&iacute;a no tienen el pago validado: <b>no se empacan</b>. Pasan solos a pesaje cuando el equipo lo confirma.</p>
+    <div class="lista" id="lista-wait"></div>
+    <details class="otros" id="rech" hidden>
+      <summary id="rech-sum">Pagos no recibidos</summary>
+      <div class="lista" id="lista-rech"></div>
+    </details>
+  </section>
+
+  <section class="col col-go" aria-labelledby="h-go">
+    <div class="col-h">
+      <h2 id="h-go">A pesaje y empaque</h2>
+      <span class="n" id="n-go">0</span>
+    </div>
+    <p class="col-sub">Escribe el <b>peso real</b> de cada producto. El total final se recalcula y se compara con el estimado del asistente. <b>El ajuste de peso es una simulaci&oacute;n de la demo: no se guarda.</b> <a href="#" id="lnk-restaurar" hidden>Volver a mostrar los despachados</a></p>
+    <div class="lista" id="lista-go"></div>
+  </section>
+
+</main>
+
+<div class="pie">
+  <span>Demostraci&oacute;n preparada por <b>IJV Agency</b> para Guiliani's Market. Los pedidos llegan del simulador de WhatsApp.</span>
+  <span class="sp"></span>
+  <a href="./whatsapp">Simulador de WhatsApp</a>
+  <a href="./">Sitio</a>
+  <a href="https://ijvagency.com/" target="_blank" rel="noopener">Powered by IJV</a>
+</div>
+
+<div id="print-area" aria-hidden="true"></div>
+
+<script>
+(function(){
+  'use strict';
+
+  /* ---------------- configuracion ---------------- */
+  var BASE_DEF = 'https://meta.ijvagency.com/webhook';
+  var qs = new URLSearchParams(location.search);
+  var esLocal = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  var BASE = (esLocal && qs.get('api')) ? qs.get('api').replace(/\/$/,'') : BASE_DEF;
+  /* `?ensayos=1` en la URL de la pagina se reenvia al endpoint para ver los pedidos de
+     prueba (`ensayo_*`) al ensayar la demo. Solo ese valor; sin el, nada cambia. */
+  var ENDPOINT = BASE + '/guilianismarket-demo-despacho' + (qs.get('ensayos') === '1' ? '?ensayos=1' : '');
+  /* Fuera de http(s) (file://, vista previa data:) la pagina NUNCA consulta el
+     endpoint real: se ve siempre con datos de ejemplo. */
+  var ORIGEN_WEB = /^https?:$/.test(location.protocol);
+  var MOCK = qs.get('mock') === '1' || !ORIGEN_WEB;
+  /* ?fast=1 solo en local: divide los tiempos para probar el corte por fallos sin esperar minutos */
+  var RAPIDO = esLocal && qs.get('fast') === '1';
+  var INTERVALO = RAPIDO ? 300 : 6000;
+  var TIMEOUT = RAPIDO ? 1500 : 8000;
+  var MAX_ESPERA = RAPIDO ? 2000 : 60000;
+  var MAX_FALLOS = 6;
+  var TZ = 'America/Santo_Domingo';
+  var ITBIS_PCT = 18;                       /* supuesto de la demo: tasa general; pregunta abierta para Yvo */
+  var KS = { despachados:'gmdespacho:despachados' };
+
+  /* ---------------- catalogo (lista de MAYOR, RD$ por libra, sin ITBIS) ----------------
+     Fuente: discovery/catalogo-final.json (la carpeta discovery no se publica, por eso va
+     embebido). `nombre` es la misma cadena que el agente copia en el marcador. Se regenera
+     entre los marcadores; no editar a mano. */
+  /*CATALOGO:INICIO*/
+  var CATALOGO = [
+    {"id":"cola-de-langosta","categoria":"Mariscos","nombre":"Cola de langosta","nombre_pdf":"COLA DE LANGOSTA","precio":966,"itbis":true,"unidad":"lb"},
+    {"id":"masa-de-cangrejo","categoria":"Mariscos","nombre":"Masa de cangrejo","nombre_pdf":"MASA DE CANGREJO","precio":536.02,"itbis":true,"unidad":"lb"},
+    {"id":"hamburguesa-de-camarones-netuno","categoria":"Mariscos","nombre":"Hamburguesa de camarones Netuno","nombre_pdf":"HAMBURGUER DE CAMARONES NETUNO","precio":607.2,"itbis":true,"unidad":"lb"},
+    {"id":"pulpo-de-2-4-lb-netuno","categoria":"Mariscos","nombre":"Pulpo de 2-4 lb Netuno","nombre_pdf":"PULPO DE 2-4 LB NETUNO","precio":523.25,"itbis":true,"unidad":"lb"},
+    {"id":"pulpo-precocido-baby-netuno","categoria":"Mariscos","nombre":"Pulpo precocido baby Netuno","nombre_pdf":"PULPO PRECOCIDO BABY NETUNO","precio":1104,"itbis":true,"unidad":"lb"},
+    {"id":"tentaculos-de-calamar","categoria":"Mariscos","nombre":"Tentáculos de calamar","nombre_pdf":"TENTACULOS DE CALAMAR","precio":166.75,"itbis":true,"unidad":"lb"},
+    {"id":"tubo-de-calamar-u-10","categoria":"Mariscos","nombre":"Tubo de calamar U 10","nombre_pdf":"TUBO DE CALAMAR U 10","precio":132.25,"itbis":true,"unidad":"lb"},
+    {"id":"camaron-con-cascara-8-12-netuno","categoria":"Mariscos","nombre":"Camarón con cáscara 8/12 Netuno","nombre_pdf":"CAMARON C/CASCARA 8/12 NETUNO","precio":529,"itbis":true,"unidad":"lb"},
+    {"id":"camaron-sin-cascara-16-20-netuno","categoria":"Mariscos","nombre":"Camarón sin cáscara 16/20 Netuno","nombre_pdf":"CAMARON S/CASCARA 16/20 NETUNO","precio":431.25,"itbis":true,"unidad":"lb"},
+    {"id":"camaron-con-cascara-16-20-netuno","categoria":"Mariscos","nombre":"Camarón con cáscara 16/20 Netuno","nombre_pdf":"CAMARON CON CASCARA 16/20 NETUNO","precio":425.5,"itbis":true,"unidad":"lb"},
+    {"id":"camaron-con-cascara-8-12","categoria":"Mariscos","nombre":"Camarón con cáscara 8/12","nombre_pdf":"CAMARON CON CASCARA 8/12","precio":270.25,"itbis":true,"unidad":"lb"},
+    {"id":"camaron-con-cascara-16-20","categoria":"Mariscos","nombre":"Camarón con cáscara 16/20","nombre_pdf":"CAMARON CON CASCARA 16/20","precio":218.5,"itbis":true,"unidad":"lb"},
+    {"id":"aros-de-calamar-netuno","categoria":"Mariscos","nombre":"Aros de calamar Netuno","nombre_pdf":"AROS DE CALAMAR NETUNO","precio":385.25,"itbis":true,"unidad":"lb"},
+    {"id":"aros-de-calamar-empanizados-netuno","categoria":"Mariscos","nombre":"Aros de calamar empanizados Netuno","nombre_pdf":"AROS DE CALAMAR EMPANIZADOS NETUNO","precio":385.25,"itbis":true,"unidad":"lb"},
+    {"id":"aros-de-calamar","categoria":"Mariscos","nombre":"Aros de calamar","nombre_pdf":"AROS DE CALAMAR","precio":172.5,"itbis":true,"unidad":"lb"},
+    {"id":"lambi-molido","categoria":"Mariscos","nombre":"Lambí molido","nombre_pdf":"LAMBI MOLIDO","precio":391,"itbis":true,"unidad":"lb"},
+    {"id":"mejillones-media-concha-netuno","categoria":"Mariscos","nombre":"Mejillones media concha Netuno","nombre_pdf":"MEJILLONES MEDIA CONCHA NETUNO","precio":287.5,"itbis":true,"unidad":"lb"},
+    {"id":"mejillones-media-concha","categoria":"Mariscos","nombre":"Mejillones media concha","nombre_pdf":"MEJILLONES MEDIA CONCHA","precio":145,"itbis":true,"unidad":"lb"},
+    {"id":"lambi-entero-empacado-al-vacio","categoria":"Mariscos","nombre":"Lambí entero empacado al vacío","nombre_pdf":"LAMBI ENTERO EMPACADO AL VACIO","precio":287.5,"itbis":true,"unidad":"lb"},
+    {"id":"almejas-blancas-netuno","categoria":"Mariscos","nombre":"Almejas blancas Netuno","nombre_pdf":"ALMEJAS BLANCAS NETUNO","precio":276,"itbis":true,"unidad":"lb"},
+    {"id":"mariscada-netuno","categoria":"Mariscos","nombre":"Mariscada Netuno","nombre_pdf":"MARISCADA NETUNO","precio":322,"itbis":true,"unidad":"lb"},
+    {"id":"mariscada-phoenix","categoria":"Mariscos","nombre":"Mariscada Phoenix","nombre_pdf":"MARISCADA PHOENIX","precio":80.5,"itbis":true,"unidad":"lb"},
+    {"id":"chillo-rojo-1-2-lb-netuno","categoria":"Pescados enteros","nombre":"Chillo rojo 1-2 lb Netuno","nombre_pdf":"CHILLO ROJO 1-2 LB NETUNO","precio":494.5,"itbis":true,"unidad":"lb"},
+    {"id":"chillo-rojo-1-5-2-5-lb","categoria":"Pescados enteros","nombre":"Chillo rojo 1.5-2.5 lb","nombre_pdf":"CHILLO ROJO 1.5-2.5 LB","precio":368,"itbis":true,"unidad":"lb"},
+    {"id":"pargo-capitan","categoria":"Pescados enteros","nombre":"Pargo capitán","nombre_pdf":"PARGO CAPITAN","precio":340.4,"itbis":true,"unidad":"lb"},
+    {"id":"branzino-o-lubina","categoria":"Pescados enteros","nombre":"Branzino o lubina","nombre_pdf":"BRANZINO O LUBINA","precio":471.5,"itbis":true,"unidad":"lb"},
+    {"id":"mero","categoria":"Pescados enteros","nombre":"Mero","nombre_pdf":"MERO","precio":264.5,"itbis":true,"unidad":"lb"},
+    {"id":"tilapia-roja","categoria":"Pescados enteros","nombre":"Tilapia roja","nombre_pdf":"TILAPIA ROJA","precio":97.75,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-salmon-chileno-netuno-porcionado","categoria":"Filetes de pescado","nombre":"Filete de salmón chileno Netuno porcionado","nombre_pdf":"FILETE DE SALMON CHILENO NETUNO PORCIONADO","precio":546.25,"itbis":true,"unidad":"lb"},
+    {"id":"filete-penca-de-salmon-chileno","categoria":"Filetes de pescado","nombre":"Filete penca de salmón chileno","nombre_pdf":"FILETE PENCA DE SALMON CHILENO","precio":460,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-salmon-chileno-porcionado-4-oz","categoria":"Filetes de pescado","nombre":"Filete de salmón chileno porcionado 4 oz","nombre_pdf":"FILETE DE SALMON CHILENO PORCIONADO 4 OZ","precio":460,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-mero-batata-porcionado-netuno","categoria":"Filetes de pescado","nombre":"Filete de mero batata porcionado Netuno","nombre_pdf":"FILETE DE MERO BATATA PORCIONADO NETUNO","precio":667,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-mero-batata-penca","categoria":"Filetes de pescado","nombre":"Filete de mero batata penca","nombre_pdf":"FILETE DE MERO BATATA PENCA","precio":667,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-mero-bassa","categoria":"Filetes de pescado","nombre":"Filete de mero bassa","nombre_pdf":"FILETE DE MERO BASSA","precio":80.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-unicornio-netuno","categoria":"Filetes de pescado","nombre":"Filete de unicornio Netuno","nombre_pdf":"FILETE DE UNICORNIO NETUNO","precio":586.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-chillo-center-cut-netuno","categoria":"Filetes de pescado","nombre":"Filete de chillo center cut Netuno","nombre_pdf":"FILETE DE CHILLO CENTER CUT NETUNO","precio":586.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-chillo-netuno-8-10-oz","categoria":"Filetes de pescado","nombre":"Filete de chillo Netuno 8/10 oz","nombre_pdf":"FILETE DE CHILLO NETUNO 8/10 OZ","precio":586.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-amberjack-netuno","categoria":"Filetes de pescado","nombre":"Filete de amberjack Netuno","nombre_pdf":"FILETE DE AMBERJACK NETUNO","precio":563.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-lomo-de-atun-rojo","categoria":"Filetes de pescado","nombre":"Filete lomo de atún rojo","nombre_pdf":"FILETE LOMO DE ATUN ROJO","precio":333.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-atun-rojo-porcionado","categoria":"Filetes de pescado","nombre":"Filete de atún rojo porcionado","nombre_pdf":"FILETE ATUN ROJO PORCIONADO","precio":333.5,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-corvina-netuno","categoria":"Filetes de pescado","nombre":"Filete de corvina Netuno","nombre_pdf":"FILETE DE CORVINA NETUNO","precio":534.75,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-carite-sierra-netuno","categoria":"Filetes de pescado","nombre":"Filete de carite sierra Netuno","nombre_pdf":"FILETE DE CARITE SIERRA NETUNO","precio":370.05,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-tilapia-roja","categoria":"Filetes de pescado","nombre":"Filete de tilapia roja","nombre_pdf":"FILETE DE TILAPIA ROJA","precio":138,"itbis":true,"unidad":"lb"},
+    {"id":"filete-de-dorado","categoria":"Filetes de pescado","nombre":"Filete de dorado","nombre_pdf":"FILETE DE DORADO","precio":201.25,"itbis":true,"unidad":"lb"},
+    {"id":"salmon-en-rodajas","categoria":"Pescados porcionados","nombre":"Salmón en rodajas","nombre_pdf":"SALMON EN RODAJAS","precio":494.5,"itbis":false,"unidad":"lb"},
+    {"id":"carite-en-rodajas","categoria":"Pescados porcionados","nombre":"Carite en rodajas","nombre_pdf":"CARITE EN RODAJAS","precio":365.47,"itbis":false,"unidad":"lb"},
+    {"id":"dorado-en-rodajas","categoria":"Pescados porcionados","nombre":"Dorado en rodajas","nombre_pdf":"DORADO EN RODAJAS","precio":272.88,"itbis":false,"unidad":"lb"},
+    {"id":"costilla-de-pescado-tambaqui-netuno","categoria":"Pescados porcionados","nombre":"Costilla de pescado tambaquí Netuno","nombre_pdf":"COSTILLA DE PESCADO TAMBAQUI NETUNO","precio":126.5,"itbis":false,"unidad":"lb"},
+    {"id":"merluza-porcionada-1-lb","categoria":"Pescados porcionados","nombre":"Merluza porcionada 1 lb","nombre_pdf":"MERLUZA PORCIONADA 1 LB","precio":81.77,"itbis":false,"unidad":"lb"},
+    {"id":"flap-meat-choice","categoria":"Res y cordero","nombre":"Flap meat Choice","nombre_pdf":"FLAP MEAT CHOICE","precio":851,"itbis":false,"unidad":"lb"},
+    {"id":"brangus-flap-meat","categoria":"Res y cordero","nombre":"Brangus flap meat","nombre_pdf":"BRANGUS FLAP MEAT","precio":550,"itbis":false,"unidad":"lb"},
+    {"id":"coulote-choice-picana","categoria":"Res y cordero","nombre":"Coulote Choice (picaña)","nombre_pdf":"COULOTE CHOICE (PICAÑA)","precio":805,"itbis":false,"unidad":"lb"},
+    {"id":"filete-de-res-tenderloin","categoria":"Res y cordero","nombre":"Filete de res tenderloin","nombre_pdf":"FILETE DE RES TENDERLOIN","precio":850,"itbis":false,"unidad":"lb"},
+    {"id":"ribeye-choice-porcionado","categoria":"Res y cordero","nombre":"Ribeye Choice porcionado","nombre_pdf":"RIBEYE CHOICE PORCIONADO","precio":810,"itbis":false,"unidad":"lb"},
+    {"id":"churrasco-angus-premium","categoria":"Res y cordero","nombre":"Churrasco Angus premium","nombre_pdf":"CHURRASCO ANGUS PREMIUM","precio":790,"itbis":false,"unidad":"lb"},
+    {"id":"osobuco-de-res-sin-hueso-premium","categoria":"Res y cordero","nombre":"Osobuco de res sin hueso premium","nombre_pdf":"OSOBUCO DE RES SIN HUESO PREMIUM","precio":236,"itbis":false,"unidad":"lb"},
+    {"id":"patas-de-res","categoria":"Res y cordero","nombre":"Patas de res","nombre_pdf":"PATAS DE RES","precio":135,"itbis":false,"unidad":"lb"},
+    {"id":"hamburguesa-angus-6-oz","categoria":"Res y cordero","nombre":"Hamburguesa Angus 6 oz","nombre_pdf":"HAMBURGUER ANGUS 6 OZ","precio":350,"itbis":false,"unidad":"lb"},
+    {"id":"bola-de-res-especial","categoria":"Res y cordero","nombre":"Bola de res especial","nombre_pdf":"BOLA DE RES ESPECIAL","precio":230,"itbis":false,"unidad":"lb"},
+    {"id":"ribeye-angus-prime","categoria":"Res y cordero","nombre":"Ribeye Angus Prime","nombre_pdf":"RIBEYE ANGUS PRIME","precio":900,"itbis":false,"unidad":"lb"},
+    {"id":"carne-molida-80-20","categoria":"Res y cordero","nombre":"Carne molida 80/20","nombre_pdf":"CARNE MOLIDA 80/20","precio":170,"itbis":false,"unidad":"lb"},
+    {"id":"carne-molida-choice","categoria":"Res y cordero","nombre":"Carne molida Choice","nombre_pdf":"CARNE MOLIDA CHOICE","precio":265,"itbis":false,"unidad":"lb"},
+    {"id":"carne-molida-angus","categoria":"Res y cordero","nombre":"Carne molida Angus","nombre_pdf":"CARNE MOLIDA ANGUS","precio":357,"itbis":false,"unidad":"lb"},
+    {"id":"costillas-de-cordero","categoria":"Res y cordero","nombre":"Costillas de cordero","nombre_pdf":"COSTILLAS DE CORDERO","precio":748,"itbis":false,"unidad":"lb"},
+    {"id":"costilla-de-cerdo-estilo-st-louis","categoria":"Cerdo","nombre":"Costilla de cerdo estilo St. Louis","nombre_pdf":"COSTILLA DE CERDO ESTILO ST LOUIS","precio":178.25,"itbis":false,"unidad":"lb"},
+    {"id":"lomo-de-cerdo","categoria":"Cerdo","nombre":"Lomo de cerdo","nombre_pdf":"LOMO DE CERDO","precio":133,"itbis":false,"unidad":"lb"},
+    {"id":"costilla-de-cerdo-baby-ribs","categoria":"Cerdo","nombre":"Costilla de cerdo baby ribs","nombre_pdf":"COSTILLA DE CERDO BABY RIBS","precio":170,"itbis":false,"unidad":"lb"},
+    {"id":"chuleta-de-cerdo-ahumada","categoria":"Cerdo","nombre":"Chuleta de cerdo ahumada","nombre_pdf":"CHULETA DE CERDO AHUMADA","precio":120,"itbis":false,"unidad":"lb"},
+    {"id":"chuleta-de-cerdo-fresca","categoria":"Cerdo","nombre":"Chuleta de cerdo fresca","nombre_pdf":"CHULETA DE CERDO FRESCA","precio":110,"itbis":false,"unidad":"lb"},
+    {"id":"longaniza-serrana","categoria":"Cerdo","nombre":"Longaniza serrana","nombre_pdf":"LONGANIZA SERRANA","precio":166.75,"itbis":false,"unidad":"lb"},
+    {"id":"barrigada-de-cerdo-importada","categoria":"Cerdo","nombre":"Barrigada de cerdo importada","nombre_pdf":"BARRIGADA DE CERDO IMPORT","precio":155,"itbis":false,"unidad":"lb"},
+    {"id":"chorizo","categoria":"Cerdo","nombre":"Chorizo","nombre_pdf":"CHORIZO","precio":130,"itbis":false,"unidad":"lb"},
+    {"id":"filete-de-cerdo-tenderloin-importado","categoria":"Cerdo","nombre":"Filete de cerdo tenderloin importado","nombre_pdf":"FILETE DE CERDO TENDERLION IMPORT","precio":194.35,"itbis":false,"unidad":"lb"},
+    {"id":"paticas-de-cerdo","categoria":"Cerdo","nombre":"Paticas de cerdo","nombre_pdf":"PATICAS DE CERDO","precio":81.65,"itbis":false,"unidad":"lb"},
+    {"id":"pierna-de-cerdo-entera","categoria":"Cerdo","nombre":"Pierna de cerdo entera","nombre_pdf":"PIERNA DE CERDO ENTERO","precio":89.7,"itbis":false,"unidad":"lb"},
+    {"id":"tocineta","categoria":"Cerdo","nombre":"Tocineta","nombre_pdf":"TOCINETA","precio":207,"itbis":false,"unidad":"lb"},
+    {"id":"hamburguesa-de-pollo","categoria":"Pollo","nombre":"Hamburguesa de pollo","nombre_pdf":"HAMBURGUER DE POLLO","precio":143.75,"itbis":false,"unidad":"lb"},
+    {"id":"pechuga-de-pollo-brasilena","categoria":"Pollo","nombre":"Pechuga de pollo brasileña","nombre_pdf":"PECHUGA DE POLLO BRASILENA","precio":130,"itbis":false,"unidad":"lb"},
+    {"id":"alas-de-pollo-party-wings","categoria":"Pollo","nombre":"Alas de pollo party wings","nombre_pdf":"ALAS DE POLLO PARTY WINGS","precio":94.3,"itbis":false,"unidad":"lb"},
+    {"id":"alas-de-pollo","categoria":"Pollo","nombre":"Alas de pollo","nombre_pdf":"ALAS DE POLLO","precio":120,"itbis":false,"unidad":"lb"},
+    {"id":"filete-muslo-de-pollo","categoria":"Pollo","nombre":"Filete muslo de pollo","nombre_pdf":"FILETE MUSLO DE POLLO","precio":54.36,"itbis":false,"unidad":"lb"},
+    {"id":"muslo-de-pollo-entero","categoria":"Pollo","nombre":"Muslo de pollo entero","nombre_pdf":"MUSLO DE POLLO ENTERO","precio":58.08,"itbis":false,"unidad":"lb"},
+    {"id":"muslo-de-pollo-bate","categoria":"Pollo","nombre":"Muslo de pollo bate","nombre_pdf":"MUSLO DE POLLO BATE","precio":55.03,"itbis":false,"unidad":"lb"},
+    {"id":"maiz-dulce","categoria":"Frutas y vegetales","nombre":"Maíz dulce","nombre_pdf":"MAIZ DULCE","precio":84,"itbis":false,"unidad":"lb"},
+    {"id":"fresas","categoria":"Frutas y vegetales","nombre":"Fresas","nombre_pdf":"FRESAS","precio":73,"itbis":false,"unidad":"lb"},
+    {"id":"vainitas","categoria":"Frutas y vegetales","nombre":"Vainitas","nombre_pdf":"VAINITAS","precio":60,"itbis":false,"unidad":"lb"},
+    {"id":"vegetales-mixtos","categoria":"Frutas y vegetales","nombre":"Vegetales mixtos","nombre_pdf":"VEGETALES MIXTOS","precio":60,"itbis":false,"unidad":"lb"}
+  ];
+  /*CATALOGO:FIN*/
+
+  /* ---------------- utilidades ---------------- */
+  function $(id){ return document.getElementById(id); }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function lsGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+  function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
+  function lsJSON(k){ try{ var v = JSON.parse(lsGet(k) || '[]'); return Array.isArray(v) ? v : []; }catch(e){ return []; } }
+
+  function toDate(v){
+    if(v == null || v === '') return null;
+    if(v instanceof Date) return v;
+    if(typeof v === 'number') return new Date(v < 1e12 ? v*1000 : v);
+    var s = String(v).trim();
+    if(/^\d{10,13}$/.test(s)) return toDate(Number(s));
+    var d = new Date(s.replace(' ','T'));
+    return isNaN(d) ? null : d;
+  }
+  function limpiaHora(s){
+    return s.replace(/[  ]/g,' ').replace(/\s*\b([APap])\.?\s*[Mm]\.?/, function(_,l){ return ' ' + l.toLowerCase() + '. m.'; });
+  }
+  function horaCorta(d){
+    if(!d) return '';
+    var s;
+    try{ s = new Intl.DateTimeFormat('es-DO',{timeZone:TZ,hour:'numeric',minute:'2-digit',hour12:true}).format(d); }
+    catch(e){ var h=d.getHours(), m=('0'+d.getMinutes()).slice(-2); s = (h%12||12)+':'+m+' '+(h<12?'a':'p')+'. m.'; }
+    return limpiaHora(s);
+  }
+  function fechaHora(d){
+    if(!d) return '';
+    try{
+      var f = new Intl.DateTimeFormat('es-DO',{timeZone:TZ,day:'numeric',month:'short',year:'numeric'}).format(d);
+      return f + ', ' + horaCorta(d);
+    }catch(e){ return horaCorta(d); }
+  }
+  function haceCuanto(d){
+    if(!d) return '';
+    var min = Math.round((Date.now() - d.getTime()) / 60000);
+    if(min < 1) return 'ahora mismo';
+    if(min === 1) return 'hace 1 min';
+    if(min < 60) return 'hace ' + min + ' min';
+    var h = Math.floor(min/60), r = min % 60;
+    return 'hace ' + h + ' h' + (r ? ' ' + r + ' min' : '');
+  }
+  function numPedido(id){
+    var s = String(id == null ? '' : id).trim();
+    if(!s) return '#-';
+    if(s.charAt(0) === '#') return s;
+    return '#' + (s.length > 12 ? s.slice(-6).toUpperCase() : s);
+  }
+
+  /* ---------------- dinero: todo en centavos enteros ----------------
+     Cada linea = precio x peso, redondeada al centavo (media hacia arriba) como en
+     una factura; el ITBIS es 18 % de la suma de lineas con ITBIS, redondeado una vez.
+     Asi lo que se ve suma exactamente. */
+  function aCents(n){ return Math.round(n * 100); }
+  function fmtRD(cents){
+    var n = (cents < 0 ? -cents : cents) / 100;
+    return (cents < 0 ? '-' : '') + 'RD$' + n.toLocaleString('en-US', { minimumFractionDigits:2, maximumFractionDigits:2 });
+  }
+  function fmtLb(n){
+    if(n == null || isNaN(n)) return '';
+    var s = (Math.round(n * 1000) / 1000).toFixed(3).replace(/0+$/,'').replace(/\.$/,'');
+    return s;
+  }
+  function lineaCents(precioCents, lb){
+    return Math.round(precioCents * Math.round(lb * 1000) / 1000);
+  }
+  function itbisCents(baseCents){ return Math.round(baseCents * ITBIS_PCT / 100); }
+
+  /* "1,234.50", "1234,5", "RD$1.234,50", 1234.5 -> numero (o null) */
+  function parseNum(v){
+    if(v == null || v === '') return null;
+    if(typeof v === 'number') return isFinite(v) ? v : null;
+    var s = String(v).replace(/[^\d.,-]/g,'');
+    if(!s) return null;
+    var c = s.lastIndexOf(','), p = s.lastIndexOf('.');
+    if(c >= 0 && p >= 0){
+      if(c > p) s = s.replace(/\./g,'').replace(',','.');   /* 1.234,50 */
+      else s = s.replace(/,/g,'');                          /* 1,234.50 */
+    }else if(c >= 0){
+      var tras = s.length - c - 1;
+      s = (tras >= 1 && tras <= 2 && s.indexOf(',') === c) ? s.replace(',','.') : s.replace(/,/g,'');
+    }
+    var n = parseFloat(s);
+    return isNaN(n) ? null : n;
+  }
+  /* peso escrito por la persona: positivo, hasta 3 decimales, coma o punto */
+  function parsePeso(v){
+    var s = String(v == null ? '' : v).trim();
+    if(!s) return { vacio:true, n:null, malo:false };
+    if(!/^\d+(?:[.,]\d{1,3})?$/.test(s)) return { vacio:false, n:null, malo:true };
+    var n = parseFloat(s.replace(',','.'));
+    return (n > 0 && n < 100000) ? { vacio:false, n:n, malo:false } : { vacio:false, n:null, malo:true };
+  }
+
+  /* ---------------- emparejar productos con el catalogo ---------------- */
+  function norm(s){
+    return String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+      .replace(/neptuno/g,'netuno').replace(/hamburguesa/g,'hamburguer').replace(/tenderlion/g,'tenderloin')
+      .replace(/[^a-z0-9\/.\-\s]/g,' ').replace(/\s+/g,' ').trim();
+  }
+  var VACIAS = { de:1, del:1, la:1, el:1, los:1, las:1, y:1 };
+  function claveTokens(s){
+    var t = norm(s).split(' ').filter(function(x){ return x && !VACIAS[x]; });
+    var vistos = {}, out = [];
+    t.forEach(function(x){ if(!vistos[x]){ vistos[x] = 1; out.push(x); } });
+    return out.sort().join(' ');
+  }
+  var IDX = { id:{}, exacto:{}, tokens:{} };
+  function indexa(){
+    IDX = { id:{}, exacto:{}, tokens:{} };
+    CATALOGO.forEach(function(c){
+      IDX.id[c.id] = c;
+      [c.nombre, c.nombre_pdf].forEach(function(n){
+        var k = norm(n); if(!k) return;
+        if(IDX.exacto[k] === undefined) IDX.exacto[k] = c;
+        else if(IDX.exacto[k] !== c) IDX.exacto[k] = null;     /* ambiguo: no se usa */
+        var t = claveTokens(n);
+        if(IDX.tokens[t] === undefined) IDX.tokens[t] = c;
+        else if(IDX.tokens[t] !== c) IDX.tokens[t] = null;
+      });
+    });
+  }
+  /* Solo coincidencia exacta (normalizada) o mismas palabras en otro orden. Nada de
+     "se parece": un producto con el nombre parecido puede costar el doble. */
+  function empareja(nombre){
+    var k = norm(nombre);
+    if(!k) return null;
+    if(IDX.exacto[k]) return IDX.exacto[k];
+    var t = claveTokens(nombre);
+    return IDX.tokens[t] || null;
+  }
+  function porPdf(pdf){
+    var k = norm(pdf);
+    for(var i = 0; i < CATALOGO.length; i++) if(norm(CATALOGO[i].nombre_pdf) === k) return CATALOGO[i];
+    return null;
+  }
+
+  /* ---------------- normalizacion de pedidos ----------------
+     `items` es texto: "5 lb Filete de salmon, 2.5 lb Camaron con cascara 16/20".
+     Se parte por ", " solo cuando lo que sigue empieza con una cantidad, para no
+     romper nombres con coma. Tolera "Nx Nombre", "Nombre x N", saltos de linea y
+     listas/objetos. */
+  var RE_SIGUE = /,\s+(?=\d+(?:[.,]\d+)?\s*(?:lbs?\b|libras?\b|[x×](?:\s|$)))/i;
+  function parseLinea(t){
+    t = String(t == null ? '' : t).replace(/\s+/g,' ').trim().replace(/[.;]+$/,'');
+    if(!t) return null;
+    var m = /^(\d+(?:[.,]\d+)?)\s*(?:lbs?|libras?)\.?\s+(.+)$/i.exec(t);
+    if(m) return { lb:parseNum(m[1]), nombre:m[2].trim() };
+    m = /^(\d+(?:[.,]\d+)?)\s*[x×]\s*(.+)$/i.exec(t);
+    if(m) return { lb:parseNum(m[1]), nombre:m[2].trim() };
+    m = /^(.+?)\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*(?:lbs?|libras?)?$/i.exec(t);
+    if(m) return { lb:parseNum(m[2]), nombre:m[1].trim() };
+    return { lb:null, nombre:t };
+  }
+  function normItems(it){
+    var out = [];
+    if(it == null) return out;
+    if(typeof it === 'string'){
+      it.split(/\r?\n|;|\|/).forEach(function(trozo){
+        trozo.split(RE_SIGUE).forEach(function(p){ var l = parseLinea(p); if(l) out.push(l); });
+      });
+      return out;
+    }
+    if(Array.isArray(it)){
+      it.forEach(function(e){
+        if(e == null) return;
+        if(typeof e === 'string'){ var l = parseLinea(e); if(l) out.push(l); return; }
+        if(typeof e === 'object'){
+          var q = e.libras != null ? e.libras : (e.cantidad != null ? e.cantidad : (e.qty != null ? e.qty : e.q));
+          var n = e.nombre || e.name || e.producto || e.item || e.descripcion || '';
+          if(n) out.push({ lb:parseNum(q), nombre:String(n).trim() });
+        }
+      });
+      return out;
+    }
+    if(typeof it === 'object') return normItems([it]);
+    return out;
+  }
+  function normEstado(e){
+    e = String(e || '').toLowerCase();
+    if(/verif|pagad|paid|ok|aprob/.test(e)) return 'verified';
+    if(/rech|reject|no_pag|nopag/.test(e)) return 'rejected';
+    return 'pending';
+  }
+  function normNotas(n){
+    if(n == null) return '';
+    if(Array.isArray(n)) n = n.join(' | ');
+    return String(n).replace(/\s*\r?\n\s*/g,' | ').trim();
+  }
+  /* Solo se copian campos conocidos: cualquier otro (p. ej. un `token`) se descarta aqui. */
+  function normPedido(p){
+    var itemsRaw = (typeof p.items === 'string') ? p.items : JSON.stringify(p.items == null ? '' : p.items);
+    var o = {
+      id: String(p.id == null ? '' : p.id),
+      creado: toDate(p.creado),
+      estado: normEstado(p.estado),
+      cliente: String(p.cliente || '').trim(),
+      direccion: String(p.direccion || '').trim(),
+      items: normItems(p.items),
+      notas: normNotas(p.notas),
+      totalCents: (function(){ var n = parseNum(p.total); return n == null ? null : aCents(n); })(),
+      pagado: toDate(p.pagado_en)
+    };
+    o.sigItems = itemsRaw;
+    o.sig = [o.estado, o.cliente, o.direccion, itemsRaw, o.notas, o.totalCents, p.creado, p.pagado_en].join('\u0001');
+    return o;
+  }
+
+  /* ---------------- estado ---------------- */
+  var st = {
+    datos: [],
+    prev: null,                       /* id -> estado de la carga anterior (null = primera) */
+    w: {},                            /* id -> { sig, filas:[{peso, precio, itbis, catId}] }  (solo en memoria) */
+    despachados: lsJSON(KS.despachados),
+    nuevoDesde: {},
+    conectado: null, cargado: false, ultimoError: null, fallos: 0
+  };
+
+  function estadoDe(p){
+    var e = st.w[p.id];
+    if(!e || e.sigItems !== p.sigItems){
+      e = st.w[p.id] = { sigItems:p.sigItems, filas:p.items.map(function(){ return { peso:'', precio:'', itbis:false, catId:'' }; }) };
+    }
+    return e;
+  }
+
+  /* ---------------- calculo del pesaje ---------------- */
+  function calcula(p){
+    var e = estadoDe(p);
+    var base = 0, sub = 0, pesados = 0, sinPrecio = 0, malos = 0, sinLista = 0;
+    var filas = p.items.map(function(it, i){
+      var s = e.filas[i];
+      var cat = s.catId ? IDX.id[s.catId] : empareja(it.nombre);
+      var r = { it:it, i:i, cat:cat, enLista:!!cat, s:s, precioCents:null, itbis:false, peso:null, pesoMalo:false, lbEf:0, lineaCents:null };
+      if(cat){ r.precioCents = aCents(cat.precio); r.itbis = !!cat.itbis; }
+      else{
+        sinLista++;
+        var pm = parseNum(s.precio);
+        r.precioCents = (pm != null && pm >= 0) ? aCents(pm) : null;
+        r.itbis = !!s.itbis;
+      }
+      var pp = parsePeso(s.peso);
+      if(pp.malo){ r.pesoMalo = true; malos++; }
+      if(pp.n != null){ r.peso = pp.n; pesados++; }
+      r.lbEf = r.peso != null ? r.peso : (it.lb || 0);
+      if(r.precioCents == null) sinPrecio++;
+      else{
+        r.lineaCents = lineaCents(r.precioCents, r.lbEf);
+        sub += r.lineaCents;
+        if(r.itbis) base += r.lineaCents;
+      }
+      return r;
+    });
+    var itb = itbisCents(base);
+    var total = sub + itb;
+    var completo = sinPrecio === 0;
+    var dif = (completo && p.totalCents != null) ? total - p.totalCents : null;
+    var pct = (dif != null && p.totalCents) ? dif / p.totalCents * 100 : null;
+    return { filas:filas, subCents:sub, itbisCents:itb, totalCents:total, pesados:pesados, n:p.items.length,
+             sinPrecio:sinPrecio, malos:malos, sinLista:sinLista, completo:completo, difCents:dif, pct:pct };
+  }
+  /* Estimado "de catalogo" para los datos de ejemplo (mismo motor, sin pesos) */
+  function estimaMock(lista){
+    var sub = 0, base = 0;
+    lista.forEach(function(x){
+      var c = x.cat; if(!c) return;
+      var l = lineaCents(aCents(c.precio), x.lb); sub += l; if(c.itbis) base += l;
+    });
+    return sub + itbisCents(base);
+  }
+
+  /* ---------------- HTML de las tarjetas ---------------- */
+  function opcionesCatalogo(){
+    var grupos = {}, orden = [];
+    CATALOGO.forEach(function(c){
+      var g = c.categoria || 'Otros';
+      if(!grupos[g]){ grupos[g] = []; orden.push(g); }
+      grupos[g].push(c);
+    });
+    return '<option value="">Elegir de la lista</option>' + orden.map(function(g){
+      return '<optgroup label="' + esc(g) + '">' + grupos[g].map(function(c){
+        return '<option value="' + esc(c.id) + '">' + esc(c.nombre) + '</option>';
+      }).join('') + '</optgroup>';
+    }).join('');
+  }
+  var OPC_CAT = '';
+
+  function itemsSimplesHTML(p){
+    if(!p.items.length) return '<li><span class="q"></span><span>Sin detalle de productos</span></li>';
+    return p.items.map(function(it){
+      return '<li><span class="q">' + (it.lb != null ? esc(fmtLb(it.lb)) + ' lb' : '') + '</span><span>' + esc(it.nombre) + '</span></li>';
+    }).join('');
+  }
+  function cabeceraHTML(p, chip){
+    var hora = p.estado === 'verified' ? (p.pagado || p.creado) : p.creado;
+    return '<div class="p-top"><span class="num">' + esc(numPedido(p.id)) + '</span>'
+      + '<span class="p-hora" data-f="hora">' + esc(horaCorta(p.creado)) + (p.creado ? ' &middot; ' + esc(haceCuanto(p.creado)) : '') + '</span>'
+      + chip + '</div>'
+      + '<div class="p-cli"><b>' + esc(p.cliente || 'Cliente sin nombre') + '</b><span>' + esc(p.direccion || 'Sin dirección') + '</span></div>'
+      + (p.notas ? '<div class="p-nota"><small>Indicaciones</small>' + esc(p.notas) + '</div>' : '');
+  }
+  function waitHTML(p, rechazado){
+    var chip = rechazado
+      ? '<span class="chip no">Pago no recibido</span>'
+      : '<span class="chip espera">Falta validar el pago</span>';
+    return '<article class="ped wait' + (rechazado ? ' rechazado' : '') + '" data-id="' + esc(p.id) + '">'
+      + cabeceraHTML(p, chip)
+      + '<ul class="lista-simple">' + itemsSimplesHTML(p) + '</ul>'
+      + '<div class="p-est"><span>Total estimado</span><b>' + esc(p.totalCents != null ? fmtRD(p.totalCents) : '-') + '</b></div>'
+      + '<div class="p-msg">' + (rechazado ? 'PAGO NO RECIBIDO. NO SE EMPACA.' : 'NO EMPACAR. Esperando que el equipo valide el pago.') + '</div>'
+      + '</article>';
+  }
+  function filaHTML(p, i){
+    var it = p.items[i];
+    return '<tr class="fila" data-i="' + i + '">'
+      + '<td class="c-prod" data-l="Producto"><span class="nom">' + esc(it.nombre) + '</span><span data-f="itb-' + i + '"></span><div data-f="manual-' + i + '"></div></td>'
+      + '<td class="c-ped r" data-l="Pedido"><b>' + (it.lb != null ? esc(fmtLb(it.lb)) : '?') + '</b> lb<small>estimado</small></td>'
+      + '<td class="c-pre r" data-l="Precio por lb" data-f="precio-' + i + '"></td>'
+      + '<td class="c-peso" data-l="Peso real"><div class="inp"><input type="text" inputmode="decimal" autocomplete="off" data-act="peso" data-i="' + i + '" aria-label="Peso real en libras de ' + esc(it.nombre) + '" placeholder="' + (it.lb != null ? esc(fmtLb(it.lb)) : '') + '"><span class="u">lb</span></div></td>'
+      + '<td class="c-sub" data-l="Subtotal" data-f="sub-' + i + '"></td>'
+      + '</tr>';
+  }
+  function goHTML(p){
+    var chip = '<span class="chip ok">Pago validado' + (p.pagado ? ' &middot; ' + esc(horaCorta(p.pagado)) : '') + '</span>';
+    var filas = p.items.map(function(it, i){ return filaHTML(p, i); }).join('');
+    return '<article class="ped go" data-id="' + esc(p.id) + '">'
+      + cabeceraHTML(p, chip)
+      + '<table class="peso-tabla"><thead><tr><th>Producto</th><th class="r">Pedido</th><th class="r">Precio por lb</th><th class="r">Peso real</th><th class="r">Subtotal</th></tr></thead>'
+      + '<tbody>' + (filas || '<tr><td colspan="5">Este pedido llegó sin detalle de productos.</td></tr>') + '</tbody></table>'
+      + '<div class="cierre">'
+      +   '<div class="prog" data-f="prog"></div>'
+      +   '<div>'
+      +     '<dl class="tot">'
+      +       '<div><dt>Subtotal real</dt><dd data-f="sub"></dd></div>'
+      +       '<div><dt>ITBIS ' + ITBIS_PCT + ' % <small>(solo productos con ITBIS)</small></dt><dd data-f="itbis"></dd></div>'
+      +       '<div class="gran"><dt>Total final</dt><dd data-f="total"></dd></div>'
+      +       '<div class="est-l"><dt>Estimado del asistente</dt><dd data-f="est"></dd></div>'
+      +     '</dl>'
+      +     '<div class="dif nd" data-f="dif"></div>'
+      +   '</div>'
+      + '</div>'
+      + '<div class="acc">'
+      +   '<button type="button" class="btn pri" data-act="imprimir">Imprimir hoja de despacho</button>'
+      +   '<button type="button" class="btn suave" data-act="reset">Restablecer pesos</button>'
+      +   '<button type="button" class="btn ok" data-act="despachado">Marcar como despachado</button>'
+      + '</div>'
+      + '</article>';
+  }
+
+  /* ---------------- hidratar y recalcular una tarjeta (sin reconstruirla) ---------------- */
+  function q(card, f){ return card.querySelector('[data-f="' + f + '"]'); }
+  function pedidoDe(card){
+    var id = card.getAttribute('data-id');
+    for(var i = 0; i < st.datos.length; i++) if(st.datos[i].id === id) return st.datos[i];
+    return null;
+  }
+  function actualiza(card, p, hidratar){
+    var c = calcula(p), e = estadoDe(p);
+    c.filas.forEach(function(r){
+      var i = r.i;
+      /* nombre: marca ITBIS o casilla manual */
+      var itb = q(card, 'itb-' + i), man = q(card, 'manual-' + i), pre = q(card, 'precio-' + i), sub = q(card, 'sub-' + i);
+      if(!itb) return;
+      if(hidratar){
+        var inp = card.querySelector('input[data-act="peso"][data-i="' + i + '"]');
+        if(inp) inp.value = e.filas[i].peso;
+        if(r.enLista){
+          itb.innerHTML = r.itbis ? '<span class="itb" title="Este producto paga ITBIS">ITBIS</span>' : '';
+          man.innerHTML = '';
+          pre.innerHTML = '<span class="pr">' + esc(fmtRD(r.precioCents)) + '</span><small>por lb</small>';
+        }else{
+          itb.innerHTML = '';
+          man.innerHTML = '<div class="sin-lista">Producto no encontrado en la lista. Escribe el precio o elige uno.</div>'
+            + '<div class="manual"><select data-act="cat" data-i="' + i + '" aria-label="Elegir el producto de la lista">' + OPC_CAT + '</select>'
+            + '<label class="chk"><input type="checkbox" data-act="itbis" data-i="' + i + '"' + (e.filas[i].itbis ? ' checked' : '') + '> Paga ITBIS</label></div>';
+          pre.innerHTML = '<div class="inp precio"><input type="text" inputmode="decimal" autocomplete="off" data-act="precio" data-i="' + i + '" aria-label="Precio por libra de ' + esc(r.it.nombre) + '" placeholder="RD$ por lb" value="' + esc(e.filas[i].precio) + '"></div>';
+        }
+        if(r.enLista && e.filas[i].catId){
+          /* eligio un producto de la lista para uno no encontrado: se puede deshacer */
+          man.innerHTML = '<div class="manual"><label class="chk">Se usa: ' + esc(r.cat.nombre) + '</label><select data-act="cat" data-i="' + i + '" aria-label="Cambiar el producto">' + OPC_CAT + '</select></div>';
+          var sel = man.querySelector('select'); if(sel) sel.value = e.filas[i].catId;
+        }
+      }
+      var inpPeso = card.querySelector('input[data-act="peso"][data-i="' + i + '"]');
+      if(inpPeso){
+        inpPeso.classList.toggle('pesado', r.peso != null);
+        inpPeso.classList.toggle('mal', r.pesoMalo);
+        inpPeso.setAttribute('aria-invalid', r.pesoMalo ? 'true' : 'false');
+      }
+      if(r.lineaCents == null){
+        sub.className = 'c-sub prov'; sub.innerHTML = 'Falta el precio';
+      }else{
+        sub.className = 'c-sub' + (r.peso == null ? ' prov' : '');
+        sub.innerHTML = esc(fmtRD(r.lineaCents)) + '<small>' + (r.peso == null ? 'con el peso pedido' : fmtLb(r.peso) + ' lb pesadas') + '</small>';
+      }
+    });
+
+    q(card, 'sub').textContent = fmtRD(c.subCents);
+    q(card, 'itbis').textContent = fmtRD(c.itbisCents);
+    q(card, 'total').textContent = c.completo ? fmtRD(c.totalCents) : fmtRD(c.totalCents) + '*';
+    q(card, 'est').textContent = p.totalCents != null ? fmtRD(p.totalCents) : '-';
+
+    var pr = '<b>Pesados ' + c.pesados + ' de ' + c.n + '.</b>';
+    if(c.pesados < c.n && c.n) pr += ' Mientras falten, el total usa el peso pedido y es provisional.';
+    else if(c.n) pr += ' Total final con peso real.';
+    if(c.malos) pr += '<div class="alerta">Revisa el peso: usa números como 5, 5.4 o 5,4.</div>';
+    if(c.sinPrecio) pr += '<div class="alerta">Falta el precio de ' + c.sinPrecio + (c.sinPrecio === 1 ? ' producto' : ' productos') + ': el total final (*) no está completo.</div>';
+    q(card, 'prog').innerHTML = pr;
+
+    var d = q(card, 'dif');
+    if(c.difCents == null){
+      d.className = 'dif nd';
+      d.innerHTML = '<span>Diferencia contra el estimado</span><span>' + (p.totalCents == null ? 'sin estimado' : 'incompleta') + '</span>';
+    }else{
+      var pct = c.pct == null ? '' : ' (' + (c.pct > 0 ? '+' : '') + (Math.round(c.pct * 10) / 10).toFixed(1) + ' %)';
+      var cls = c.difCents > 0 ? 'mayor' : (c.difCents === 0 ? 'igual' : 'menor');
+      var txt = c.difCents === 0 ? 'RD$0.00' : (c.difCents > 0 ? '+' : '') + fmtRD(c.difCents);
+      d.className = 'dif ' + cls;
+      d.innerHTML = '<span>' + (c.difCents > 0 ? 'Más que el estimado' : (c.difCents < 0 ? 'Menos que el estimado' : 'Igual al estimado')) + '</span><span>' + esc(txt + pct) + '</span>';
+    }
+  }
+
+  /* ---------------- diff por clave: solo se reemplaza la tarjeta cuyos DATOS cambiaron.
+     Los pesos que se escriben viven en `st.w` y se pintan sin reconstruir, asi el
+     sondeo cada 6 s no le quita el foco a quien esta escribiendo. ---------------- */
+  function sincroniza(cont, items, fn, hidrata){
+    var existentes = {};
+    Array.prototype.forEach.call(cont.children, function(el){ if(el.hasAttribute('data-key')) existentes[el.getAttribute('data-key')] = el; });
+    var vistos = {}, prevEl = null;
+    items.forEach(function(p){
+      var key = p.id, el = existentes[key];
+      vistos[key] = true;
+      if(!el || el.getAttribute('data-sig') !== p.sig){
+        var tmp = document.createElement('div'); tmp.innerHTML = fn(p);
+        var nuevo = tmp.firstElementChild;
+        nuevo.setAttribute('data-key', key); nuevo.setAttribute('data-sig', p.sig);
+        if(recienLlegado(key)) nuevo.classList.add('nuevo');
+        if(el) cont.replaceChild(nuevo, el); else cont.appendChild(nuevo);
+        el = nuevo;
+        if(hidrata) actualiza(el, p, true);
+      }else if(el.classList.contains('nuevo') && !recienLlegado(key)){
+        el.classList.remove('nuevo');      /* sin reconstruir: no se pierde el foco de quien escribe */
+      }
+      var despues = prevEl;
+      if((despues ? despues.nextSibling : cont.firstChild) !== el){
+        cont.insertBefore(el, despues ? despues.nextSibling : cont.firstChild);
+      }
+      prevEl = el;
+    });
+    Object.keys(existentes).forEach(function(k){ if(!vistos[k] && existentes[k].parentNode === cont) cont.removeChild(existentes[k]); });
+  }
+  function conPlaceholder(cont, vacioHTML, n){
+    var ph = cont.querySelector(':scope > .vacio');
+    if(n === 0){
+      var d = document.createElement('div'); d.innerHTML = vacioHTML;
+      var nuevo = d.firstElementChild;
+      if(!ph) cont.insertBefore(nuevo, cont.firstChild);
+      else if(ph.getAttribute('data-h') !== nuevo.getAttribute('data-h')) cont.replaceChild(nuevo, ph);
+    }else if(ph){ cont.removeChild(ph); }
+  }
+  function recienLlegado(id){ var t = st.nuevoDesde[id]; return !!t && (Date.now() - t) < 7000; }
+
+  function reciente(a, b){ var x = (a.pagado || a.creado || 0), y = (b.pagado || b.creado || 0); return (y - x) || 0; }
+
+  function pinta(){
+    var desp = st.despachados;
+    var go = st.datos.filter(function(p){ return p.estado === 'verified' && desp.indexOf(p.id) < 0; }).sort(reciente);
+    var wait = st.datos.filter(function(p){ return p.estado === 'pending'; }).sort(reciente);
+    var rech = st.datos.filter(function(p){ return p.estado === 'rejected'; }).sort(reciente);
+    var nDesp = st.datos.filter(function(p){ return p.estado === 'verified' && desp.indexOf(p.id) >= 0; }).length;
+
+    $('k-go').textContent = go.length; $('n-go').textContent = go.length;
+    $('k-wait').textContent = wait.length; $('n-wait').textContent = wait.length;
+    document.title = (go.length ? '(' + go.length + ') ' : '') + 'Despacho | Guiliani\'s Market, panel de la demo';
+    $('lnk-restaurar').hidden = nDesp === 0;
+    if(nDesp) $('lnk-restaurar').textContent = 'Volver a mostrar los despachados (' + nDesp + ').';
+
+    var vacioGo, vacioWait = '<div class="vacio" data-h="w0">Nada esperando validación.</div>';
+    if(!st.cargado){
+      vacioGo = st.ultimoError
+        ? '<div class="vacio err" data-h="err"><strong>Todavía no hay conexión con el panel.</strong>Se sigue intentando solo. Si es una prueba, abre esta página con <b>?mock=1</b> para ver pedidos de ejemplo.</div>'
+        : '<div class="vacio" data-h="cargando"><strong>Conectando con el panel&hellip;</strong>Un momento.</div>';
+    }else if(st.datos.length === 0){
+      vacioGo = '<div class="vacio" data-h="g0"><strong>Todavía no hay pedidos.</strong>Cuando alguien pida en el <a href="./whatsapp">simulador de WhatsApp</a> y el equipo valide el pago, el pedido aparece aquí para pesarlo.</div>';
+    }else{
+      vacioGo = '<div class="vacio" data-h="g1"><strong>Sin pedidos por pesar.</strong>Cuando se valide un pago, el pedido aparece aquí.</div>';
+    }
+
+    sincroniza($('lista-go'), go, goHTML, true);
+    conPlaceholder($('lista-go'), vacioGo, go.length);
+    sincroniza($('lista-wait'), wait, function(p){ return waitHTML(p, false); }, false);
+    conPlaceholder($('lista-wait'), vacioWait, wait.length);
+    sincroniza($('lista-rech'), rech, function(p){ return waitHTML(p, true); }, false);
+    $('rech').hidden = rech.length === 0;
+    $('rech-sum').textContent = 'Pagos no recibidos (' + rech.length + ')';
+  }
+  /* refresca los "hace X min" sin tocar los pesos */
+  function refrescaHoras(){
+    Array.prototype.forEach.call(document.querySelectorAll('.ped'), function(card){
+      var p = pedidoDe(card); if(!p) return;
+      var el = q(card, 'hora'); if(el) el.innerHTML = esc(horaCorta(p.creado)) + (p.creado ? ' &middot; ' + esc(haceCuanto(p.creado)) : '');
+    });
+  }
+
+  /* ---------------- hoja de despacho (impresion) ---------------- */
+  function hojaHTML(p){
+    var c = calcula(p);
+    var h = '<div class="hoja">';
+    h += '<div class="h-top"><img src="assets/despacho-logo.png" width="240" height="211" alt="">'
+       + '<div><h1>Hoja de despacho</h1><p>Guiliani\'s Market</p></div>'
+       + '<div class="h-num"><b>' + esc(numPedido(p.id)) + '</b><span>' + esc(fechaHora(p.creado)) + '</span></div></div>';
+    h += '<div class="h-cli"><div><small>Cliente</small><b>' + esc(p.cliente || 'Cliente sin nombre') + '</b></div>'
+       + '<div><small>Pago validado</small><b>' + esc(p.pagado ? horaCorta(p.pagado) : 'pendiente') + '</b></div>'
+       + '<div class="ancho"><small>Dirección de entrega</small><b>' + esc(p.direccion || 'Sin dirección') + '</b></div>'
+       + (p.notas ? '<div class="ancho"><small>Indicaciones del cliente</small><b>' + esc(p.notas) + '</b></div>' : '')
+       + '</div>';
+    h += '<table><thead><tr><th>Producto</th><th class="r">Pedido (lb)</th><th class="r">Peso real (lb)</th><th class="r">Precio por lb</th><th class="r">Subtotal</th></tr></thead><tbody>';
+    c.filas.forEach(function(r){
+      h += '<tr><td>' + esc(r.it.nombre) + (r.itbis ? '<span class="it">ITBIS</span>' : '') + '</td>'
+         + '<td class="r">' + (r.it.lb != null ? esc(fmtLb(r.it.lb)) : '?') + '</td>'
+         + '<td class="r">' + (r.peso != null ? '<b>' + esc(fmtLb(r.peso)) + '</b>' : '<span class="raya"></span>') + '</td>'
+         + '<td class="r">' + (r.precioCents != null ? esc(fmtRD(r.precioCents)) : '<span class="raya"></span>') + '</td>'
+         + '<td class="r">' + (r.lineaCents != null ? esc(fmtRD(r.lineaCents)) + (r.peso == null ? ' (est.)' : '') : '') + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    h += '<div class="h-tot"><div><span>Subtotal</span><span>' + esc(fmtRD(c.subCents)) + '</span></div>'
+       + '<div><span>ITBIS ' + ITBIS_PCT + ' %</span><span>' + esc(fmtRD(c.itbisCents)) + '</span></div>'
+       + '<div class="gran"><span>Total final' + (c.pesados < c.n || !c.completo ? ' (provisional)' : '') + '</span><span>' + esc(fmtRD(c.totalCents)) + '</span></div>'
+       + (p.totalCents != null ? '<div><span>Estimado del asistente</span><span>' + esc(fmtRD(p.totalCents)) + '</span></div>' : '')
+       + (c.difCents != null ? '<div><span>Diferencia</span><span>' + esc((c.difCents > 0 ? '+' : '') + fmtRD(c.difCents)) + '</span></div>' : '')
+       + '</div>';
+    if(c.pesados < c.n) h += '<div class="h-aviso">Faltan ' + (c.n - c.pesados) + ' producto(s) por pesar: los subtotales marcados (est.) usan el peso pedido.</div>';
+    h += '<div class="h-firma"><div>Empacó (nombre y firma)</div><div>Fecha y hora</div><div>Salió con</div></div>';
+    h += '<p class="h-pie">Hoja de una demostración preparada por IJV Agency. El ajuste de peso es una simulación y no se guarda. No es un comprobante fiscal.</p>';
+    h += '</div>';
+    return h;
+  }
+  function imprime(p){
+    $('print-area').innerHTML = hojaHTML(p);
+    /* dejar que el navegador pinte el area antes de abrir el dialogo */
+    setTimeout(function(){
+      try{ window.print(); }catch(e){}
+      setTimeout(function(){ $('print-area').innerHTML = ''; }, 400);
+    }, 120);
+  }
+
+  /* ---------------- detalle de cambios entre cargas ---------------- */
+  function aplica(lista){
+    var datos = lista.map(normPedido).filter(function(p){ return p.id; });
+    if(st.prev !== null){
+      datos.forEach(function(p){
+        var antes = st.prev[p.id];
+        if(antes === undefined || (p.estado === 'verified' && antes !== 'verified')) st.nuevoDesde[p.id] = Date.now();
+      });
+    }
+    var mapa = {}; datos.forEach(function(p){ mapa[p.id] = p.estado; });
+    st.prev = mapa; st.datos = datos; st.cargado = true; st.ultimoError = null;
+    pinta();
+  }
+
+  /* ---------------- red ---------------- */
+  function traer(){
+    if(MOCK) return Promise.resolve(mockLista());
+    var ctl = ('AbortController' in window) ? new AbortController() : null;
+    var to = setTimeout(function(){ if(ctl) ctl.abort(); }, TIMEOUT);
+    return fetch(ENDPOINT, { cache:'no-store', signal: ctl ? ctl.signal : undefined }).then(function(r){
+      clearTimeout(to);
+      if(!r.ok){ var e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+      return r.json();
+    }, function(e){ clearTimeout(to); throw e; }).then(function(j){
+      if(!j || j.ok === false || !Array.isArray(j.pedidos)) throw new Error('respuesta inesperada');
+      return j.pedidos;
+    });
+  }
+  function pintaEstado(){
+    var el = $('est'), tx = $('est-txt');
+    el.className = 'est' + (MOCK ? ' mock' : (st.conectado ? '' : ' off'));
+    if(MOCK) tx.textContent = 'Datos de ejemplo';
+    else if(st.conectado) tx.textContent = 'En vivo · ' + horaSeg(new Date());
+    else tx.textContent = 'Sin conexión';
+    var av = $('aviso-red');
+    if(!MOCK && !st.conectado && st.cargado && st.fallos < MAX_FALLOS){
+      av.hidden = false;
+      av.textContent = 'Se perdió la conexión con el panel. Los pedidos que ves son los últimos recibidos; se actualiza solo al volver.';
+    }else if(st.fallos < MAX_FALLOS){ av.hidden = true; }
+  }
+  function horaSeg(d){
+    var p = function(n){ return (n<10?'0':'')+n; };
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  /* La instancia de n8n es compartida con todos los clientes: un endpoint caido no se
+     martilla. Tras un fallo el intervalo se duplica (tope 60 s) y despues de MAX_FALLOS
+     seguidos la pagina deja de consultar hasta que alguien toque "Reintentar". Con la
+     pestana oculta tampoco se consulta. */
+  var timer = null, enVuelo = false, ultimoIntento = 0;
+  function proximaEspera(){
+    if(st.fallos === 0) return INTERVALO;
+    return Math.min(INTERVALO * Math.pow(2, st.fallos), MAX_ESPERA);
+  }
+  function programa(ms){ clearTimeout(timer); timer = setTimeout(ciclo, ms); }
+  function ciclo(){
+    if(!MOCK && document.hidden){ programa(INTERVALO); return; }
+    if(enVuelo) return;
+    enVuelo = true; ultimoIntento = Date.now();
+    traer().then(function(lista){
+      st.fallos = 0; st.conectado = true; aplica(lista); pintaEstado();
+    }).catch(function(e){
+      st.fallos++; st.conectado = false; st.ultimoError = e; pintaEstado();
+      if(!st.cargado) pinta();
+    }).then(function(){
+      enVuelo = false;
+      if(!MOCK && st.fallos >= MAX_FALLOS){ detenido(); return; }
+      programa(proximaEspera());
+    });
+  }
+  function detenido(){
+    var av = $('aviso-red');
+    av.hidden = false;
+    av.innerHTML = 'El panel no responde, así que esta página dejó de consultar. <button type="button" id="btn-reintentar" class="btn-mini">Reintentar</button>';
+    $('est-txt').textContent = 'Consulta detenida';
+    var b = $('btn-reintentar');
+    if(b) b.onclick = function(){ st.fallos = 0; av.hidden = true; programa(0); };
+  }
+
+  /* ---------------- datos de ejemplo (?mock=1) ----------------
+     Armados con el catalogo embebido (por nombre_pdf, asi siguen vigentes aunque
+     cambie el nombre que usa el agente). Uno tiene un producto que NO empareja. */
+  var mockEstado = null;
+  function itemsMock(spec){
+    var lista = [], partes = [];
+    spec.forEach(function(s){
+      var c = s.pdf ? porPdf(s.pdf) : null;
+      if(s.pdf && !c) return;
+      var nombre = c ? c.nombre : s.nombre;
+      lista.push({ cat:c, lb:s.lb });
+      partes.push(fmtLb(s.lb) + ' lb ' + nombre);
+    });
+    return { texto: partes.join(', '), est: estimaMock(lista) };
+  }
+  function mockLista(){
+    if(!mockEstado){
+      var t = Date.now(), min = 60000, m;
+      mockEstado = [];
+      m = itemsMock([{pdf:'COSTILLA DE CERDO BABY RIBS', lb:8}, {pdf:'PECHUGA DE POLLO BRASILENA', lb:6}]);
+      mockEstado.push({ id:'GM-1050', creado:new Date(t-52*min).toISOString(), estado:'verified', cliente:'Carmen Peña', direccion:'Calle Max Henríquez Ureña 45, Naco, Santo Domingo',
+        items:m.texto, notas:'Que lo empaquen por separado: la res en una funda y el pollo en otra.', total:m.est/100, pagado_en:new Date(t-44*min).toISOString() });
+      m = itemsMock([{pdf:'FILETE DE SALMON CHILENO PORCIONADO 4 OZ', lb:5}, {pdf:'CAMARON CON CASCARA 16/20', lb:2.5}, {pdf:'CARNE MOLIDA 80/20', lb:10}]);
+      mockEstado.push({ id:'GM-1052', creado:new Date(t-12*min).toISOString(), estado:'verified', cliente:'Restaurante Mar y Tierra (demo)', direccion:'Av. Winston Churchill 100, Piantini, Santo Domingo',
+        items:m.texto, notas:'Entregar por la puerta de atrás. Llamar al llegar.', total:m.est/100, pagado_en:new Date(t-7*min).toISOString() });
+      mockEstado.push({ id:'GM-1051', creado:new Date(t-31*min).toISOString(), estado:'verified', cliente:'Pizzería Tía Rosa (demo)', direccion:'Calle Duarte 18, Villa Mella, Santo Domingo Norte',
+        items:itemsMock([{nombre:'Langosta entera viva', lb:4}, {pdf:'PULPO DE 2-4 LB NETUNO', lb:3}]).texto, notas:'', total:3200, pagado_en:new Date(t-26*min).toISOString() });
+      m = itemsMock([{pdf:'MASA DE CANGREJO', lb:5}, {pdf:'COLA DE LANGOSTA', lb:3}]);
+      mockEstado.push({ id:'GM-1053', creado:new Date(t-3*min).toISOString(), estado:'pending', cliente:'Hotel Playa Serena (demo)', direccion:'Carretera Juan Dolio, km 4, San Pedro de Macorís',
+        items:m.texto, notas:'Pedido para el restaurante del hotel.', total:m.est/100, pagado_en:null });
+      m = itemsMock([{pdf:'PATAS DE RES', lb:12}]);
+      mockEstado.push({ id:'GM-1049', creado:new Date(t-70*min).toISOString(), estado:'rejected', cliente:'Colmado La Esperanza (demo)', direccion:'Calle 5 #22, Los Mina, Santo Domingo Este',
+        items:m.texto, notas:'', total:m.est/100, pagado_en:null });
+    }
+    return mockEstado.slice().reverse();      /* el endpoint real entrega el mas reciente primero */
+  }
+  var mockSeq = 1054;
+  function simulaPedido(){
+    var muestras = [
+      { cliente:'Doña Altagracia', direccion:'Calle Padre Billini 40, Zona Colonial', items:[{pdf:'MERO', lb:6}, {pdf:'TILAPIA ROJA', lb:4}], notas:'Sin hielo seco.' },
+      { cliente:'Parrillada El Cacique (demo)', direccion:'Av. 27 de Febrero 301, Santo Domingo', items:[{pdf:'CHURRASCO ANGUS PREMIUM', lb:15}, {pdf:'COSTILLAS DE CORDERO', lb:6}], notas:'Entregar antes del mediodia.' },
+      { cliente:'Carlos Mendoza', direccion:'Av. Abraham Lincoln 300, Piantini', items:[{pdf:'FILETE DE SALMON CHILENO PORCIONADO 4 OZ', lb:10}], notas:'' }
+    ];
+    var s = muestras[Math.floor(Math.random()*muestras.length)];
+    mockLista();
+    var m = itemsMock(s.items);
+    var id = 'GM-' + (mockSeq++);
+    mockEstado.push({ id:id, creado:new Date().toISOString(), estado:'pending', cliente:s.cliente, direccion:s.direccion, items:m.texto, notas:s.notas, total:m.est/100, pagado_en:null });
+    /* a los 6 s el "validador" confirma el pago, como haria el equipo desde su correo */
+    setTimeout(function(){
+      mockEstado.forEach(function(p){ if(p.id === id){ p.estado = 'verified'; p.pagado_en = new Date().toISOString(); } });
+    }, 6000);
+  }
+
+  /* ---------------- arranque ---------------- */
+  function init(){
+    indexa();
+    OPC_CAT = opcionesCatalogo();
+    pinta();
+
+    var go = $('lista-go');
+    /* escribir un peso / precio: solo se recalcula, la tarjeta no se reconstruye */
+    go.addEventListener('input', function(ev){
+      var el = ev.target; if(!el || !el.getAttribute) return;
+      var act = el.getAttribute('data-act'); if(act !== 'peso' && act !== 'precio') return;
+      var card = el.closest('.ped'); if(!card) return;
+      var p = pedidoDe(card); if(!p) return;
+      var i = +el.getAttribute('data-i');
+      estadoDe(p).filas[i][act] = el.value;
+      actualiza(card, p, false);
+    });
+    go.addEventListener('change', function(ev){
+      var el = ev.target; if(!el || !el.getAttribute) return;
+      var act = el.getAttribute('data-act');
+      var card = el.closest('.ped'); if(!card) return;
+      var p = pedidoDe(card); if(!p) return;
+      var i = +el.getAttribute('data-i');
+      if(act === 'cat'){ estadoDe(p).filas[i].catId = el.value; actualiza(card, p, true); }
+      else if(act === 'itbis'){ estadoDe(p).filas[i].itbis = el.checked; actualiza(card, p, false); }
+    });
+    go.addEventListener('click', function(ev){
+      var b = ev.target.closest && ev.target.closest('button[data-act]'); if(!b) return;
+      var card = b.closest('.ped'); var p = card && pedidoDe(card); if(!p) return;
+      var act = b.getAttribute('data-act');
+      if(act === 'imprimir') imprime(p);
+      else if(act === 'reset'){
+        var e = estadoDe(p);
+        e.filas = p.items.map(function(){ return { peso:'', precio:'', itbis:false, catId:'' }; });
+        actualiza(card, p, true);
+      }else if(act === 'despachado'){
+        if(st.despachados.indexOf(p.id) < 0){
+          st.despachados.push(p.id);
+          if(st.despachados.length > 300) st.despachados = st.despachados.slice(-300);
+          lsSet(KS.despachados, JSON.stringify(st.despachados));
+        }
+        pinta();
+      }
+    });
+    $('lnk-restaurar').addEventListener('click', function(ev){
+      ev.preventDefault(); st.despachados = []; lsSet(KS.despachados, '[]'); pinta();
+    });
+
+    if(MOCK){
+      var bs = $('btn-sim'); bs.hidden = false;
+      bs.addEventListener('click', simulaPedido);
+    }
+
+    var reloj = function(){
+      var s;
+      try{ s = new Intl.DateTimeFormat('es-DO',{timeZone:TZ,hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date()); }
+      catch(e){ var d = new Date(), p = function(n){ return (n<10?'0':'')+n; }; s = p(d.getHours()) + ':' + p(d.getMinutes()); }
+      $('reloj').textContent = s;
+    };
+    reloj(); setInterval(reloj, 15000);
+    setInterval(function(){ if(st.cargado && !document.hidden) refrescaHoras(); }, 30000);
+    /* al volver a la pestana se consulta pronto (con tope: no se apila con el ciclo normal) */
+    document.addEventListener('visibilitychange', function(){
+      if(!document.hidden && !MOCK && st.fallos < MAX_FALLOS && !enVuelo && Date.now() - ultimoIntento > 2500) programa(0);
+    });
+
+    ciclo();
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
+</script>
+</body>
+</html>
